@@ -2,14 +2,262 @@
 <html>
 <head>
   <style>
-    body { width: 200px; padding: 15px; font-family: sans-serif; text-align: center; }
-    button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
-    #status { margin-top: 10px; color: #555; }
+    body {
+      width: 320px;
+      padding: 20px;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #ffffff;
+      color: #333;
+    }
+    
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 10px;
+    }
+
+    .logo {
+      font-size: 20px;
+      font-weight: bold;
+      color: #2563eb; /* Blue */
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-icon {
+      background-color: #2563eb;
+      color: white;
+      width: 30px;
+      height: 30px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+    }
+
+    .settings-icon {
+      cursor: pointer;
+      color: #888;
+      font-size: 18px;
+    }
+
+    .setting-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+      font-size: 14px;
+    }
+
+    .setting-label {
+      font-weight: 600;
+    }
+
+    .radio-group {
+      display: flex;
+      gap: 15px;
+    }
+
+    .radio-group label {
+      cursor: pointer;
+    }
+
+    .slider-container {
+      margin-bottom: 15px;
+    }
+
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 14px;
+      margin-bottom: 8px;
+    }
+
+    .speed-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: #888;
+      margin-top: 5px;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      accent-color: #2563eb;
+    }
+
+    .toggle-container {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 22px;
+    }
+
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ccc;
+      transition: .4s;
+      border-radius: 22px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .4s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: #2563eb;
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(18px);
+    }
+
+    .capture-btn {
+      width: 100%;
+      padding: 12px;
+      background-color: #2563eb;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 10px;
+      transition: background-color 0.2s;
+    }
+
+    .capture-btn:hover {
+      background-color: #1d4ed8;
+    }
+
+    .status-bar {
+      margin-top: 15px;
+      font-size: 13px;
+      color: #555;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 4px;
+      background-color: #eee;
+      border-radius: 2px;
+      margin-top: 5px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background-color: #2563eb;
+      transition: width 0.2s;
+    }
+
+    .footer {
+      margin-top: 15px;
+      border-top: 1px solid #eee;
+      padding-top: 10px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: #2563eb;
+    }
+
+    .footer span {
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
-  <button id="captureBtn">Capture Full Page</button>
-  <div id="status">Ready</div>
+  <div class="header">
+    <div class="logo">
+      <div class="logo-icon">tb</div>
+      <span>ZiS</span>
+    </div>
+    <div class="settings-icon">⚙️</div>
+  </div>
+
+  <!-- Settings -->
+  <div class="setting-row">
+    <span class="setting-label">Format:</span>
+    <div class="radio-group">
+      <label><input type="radio" name="format" value="png" checked> PNG</label>
+      <label><input type="radio" name="format" value="jpg"> JPG</label>
+    </div>
+  </div>
+
+  <div class="slider-container">
+    <div class="slider-header">
+      <span class="setting-label">Auto-scroll speed:</span>
+      <span id="speedValue" style="color: #2563eb;">Medium</span>
+    </div>
+    <input type="range" id="speedSlider" min="1" max="3" step="1" value="2">
+    <div class="speed-labels">
+      <span>Slow</span>
+      <span>Medium</span>
+      <span>Fast</span>
+    </div>
+  </div>
+
+  <div class="setting-row">
+    <span class="setting-label">Show notifications:</span>
+    <div class="toggle-container">
+      <label class="toggle-switch">
+        <input type="checkbox" id="notifyToggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <!-- Capture Button -->
+  <button id="captureBtn" class="capture-btn">📸 Capture Full Page</button>
+
+  <!-- Status -->
+  <div class="status-bar">
+    <span id="status">Ready</span>
+    <span id="percent">0%</span>
+  </div>
+  <div class="progress-bar">
+    <div id="progressFill" class="progress-fill"></div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span>❓ Help</span>
+    <span>↗ Open dashboard</span>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
