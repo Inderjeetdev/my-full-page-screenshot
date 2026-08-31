@@ -1,11 +1,10 @@
 /*
  * ZiS - Full Page Screenshot
- * background.js  (v1.0.2)
+ * background.js  (v1.0.3)
  *
- * Architecture change:
- * - Capture one viewport → send that single screenshot to offscreen → draw → release memory
- * - Never keep the full array of huge base64 strings in memory at once
- * - Messaging between service worker and offscreen is now correct (await the response)
+ * - Sequential stitching (one screenshot at a time)
+ * - Robust handling of "Frame with ID 0 was removed"
+ * - Safety limits for infinite-scroll pages
  */
 
 function sleep(ms) {
@@ -46,16 +45,33 @@ async function ensureOffscreenDocument() {
 // ============================================================
 
 async function executeInPage(tabId, func, args = []) {
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func,
-    args
-  });
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func,
+      args
+    });
 
-  if (!results || !results.length) {
-    throw new Error("Could not execute code inside the webpage.");
+    if (!results || !results.length) {
+      throw new Error("Could not execute code inside the webpage.");
+    }
+    return results[0].result;
+  } catch (error) {
+    const msg = error?.message || String(error);
+
+    // Common when the page document is replaced (infinite scroll, SPA, etc.)
+    if (
+      msg.includes("Frame with ID 0 was removed") ||
+      msg.includes("No frame with ID") ||
+      (msg.includes("Frame with ID") && msg.includes("was removed")) ||
+      msg.includes("The tab was closed") ||
+      msg.includes("Cannot access contents of the page")
+    ) {
+      throw new Error("PAGE_UNSTABLE:" + msg);
+    }
+
+    throw error;
   }
-  return results[0].result;
 }
 
 async function isAccessiblePage(tabId) {
@@ -101,7 +117,7 @@ async function restoreScroll(tabId, x, y) {
       window.scrollTo(scrollX, scrollY);
     }, [x, y]);
   } catch (error) {
-    console.warn("Could not restore scroll position:", error);
+    // Ignore – page may already be unstable
   }
 }
 
@@ -135,7 +151,7 @@ async function setCaptureMode(tabId, enabled) {
       }
     }, [enabled]);
   } catch (error) {
-    console.warn("Could not change capture mode:", error);
+    // Ignore
   }
 }
 
@@ -148,38 +164,59 @@ function sendProgress(progress, message) {
 }
 
 // ============================================================
-// PRE-LOAD LAZY CONTENT
+// PRE-LOAD (with safety limits)
 // ============================================================
 
 async function preloadPage(tabId, initialHeight, viewportHeight) {
   let y = 0;
   let lastHeight = initialHeight;
+  let steps = 0;
+  const MAX_PRELOAD_STEPS = 40;
 
-  while (y < lastHeight) {
-    await scrollPage(tabId, y);
-    await sleep(150);
+  while (y < lastHeight && steps < MAX_PRELOAD_STEPS) {
+    try {
+      await scrollPage(tabId, y);
+      await sleep(150);
 
-    const info = await getPageInfo(tabId);
-    lastHeight = Math.max(lastHeight, info.scrollHeight);
-    y += viewportHeight * 0.8;
+      const info = await getPageInfo(tabId);
+      lastHeight = Math.max(lastHeight, info.scrollHeight);
+      y += viewportHeight * 0.8;
+      steps++;
+    } catch (error) {
+      if (String(error.message).startsWith("PAGE_UNSTABLE:")) {
+        console.warn("Page became unstable during preload – stopping early.");
+        break;
+      }
+      throw error;
+    }
   }
 
-  await scrollPage(tabId, 0);
-  await sleep(500);
-
-  return await getPageInfo(tabId);
+  try {
+    await scrollPage(tabId, 0);
+    await sleep(400);
+    return await getPageInfo(tabId);
+  } catch (error) {
+    if (String(error.message).startsWith("PAGE_UNSTABLE:")) {
+      return {
+        scrollWidth: 0,
+        scrollHeight: lastHeight,
+        viewportWidth: 0,
+        viewportHeight,
+        devicePixelRatio: 1,
+        scrollX: 0,
+        scrollY: 0
+      };
+    }
+    throw error;
+  }
 }
 
 // ============================================================
-// OFFSCREEN COMMUNICATION (one screenshot at a time)
+// OFFSCREEN COMMUNICATION
 // ============================================================
 
-/**
- * Tell the offscreen document to start a new canvas.
- */
 async function offscreenStart(outputWidth, outputHeight, format) {
   await ensureOffscreenDocument();
-
   return await chrome.runtime.sendMessage({
     action: "stitchStart",
     outputWidth,
@@ -188,9 +225,6 @@ async function offscreenStart(outputWidth, outputHeight, format) {
   });
 }
 
-/**
- * Send a single viewport screenshot to be drawn onto the canvas.
- */
 async function offscreenAddScreenshot(dataUrl, scrollY, scale) {
   return await chrome.runtime.sendMessage({
     action: "stitchAdd",
@@ -200,9 +234,6 @@ async function offscreenAddScreenshot(dataUrl, scrollY, scale) {
   });
 }
 
-/**
- * Finalize the canvas and receive the finished data URL.
- */
 async function offscreenFinish() {
   return await chrome.runtime.sendMessage({
     action: "stitchFinish"
@@ -264,24 +295,30 @@ async function captureFullPage(tabId, windowId, format, speed, notify) {
     sendProgress(8, "Loading page content...");
     pageInfo = await preloadPage(tabId, pageInfo.scrollHeight, viewportHeight);
 
-    viewportHeight = pageInfo.viewportHeight;
-    const scrollWidth = pageInfo.scrollWidth;
-    const scrollHeight = pageInfo.scrollHeight;
-    const devicePixelRatio = pageInfo.devicePixelRatio;
+    viewportHeight = pageInfo.viewportHeight || viewportHeight;
+    const scrollWidth = pageInfo.scrollWidth || 0;
+    let scrollHeight = pageInfo.scrollHeight || 0;
+    const devicePixelRatio = pageInfo.devicePixelRatio || 1;
 
-    const scale = Math.min(devicePixelRatio || 1, 2);
-    const outputWidth = Math.round(scrollWidth * scale);
-    const outputHeight = Math.round(scrollHeight * scale);
+    const scale = Math.min(devicePixelRatio, 2);
+    const outputWidth = Math.round((scrollWidth || window.innerWidth) * scale);
+    let outputHeight = Math.round(scrollHeight * scale);
 
-    if (outputWidth > 32767 || outputHeight > 32767) {
+    // Safety for extremely tall pages
+    if (outputHeight > 32767) {
+      outputHeight = 32767;
+      scrollHeight = Math.floor(32767 / scale);
+    }
+
+    if (outputWidth > 32767) {
       throw new Error(
-        "This webpage is too large to create as one image. Try reducing browser zoom or capturing a shorter page."
+        "This webpage is too wide to create as one image. Try reducing browser zoom."
       );
     }
 
     sendProgress(12, "Starting capture...");
 
-    // Start a fresh canvas in the offscreen document
+    // Start canvas in offscreen document
     const startResult = await offscreenStart(outputWidth, outputHeight, format);
     if (!startResult || !startResult.success) {
       throw new Error(startResult?.error || "Could not initialise screenshot canvas.");
@@ -290,22 +327,42 @@ async function captureFullPage(tabId, windowId, format, speed, notify) {
     const delays = { 1: 450, 2: 250, 3: 150 };
     const delay = delays[speed] || delays[2];
 
+    // ---------- SAFETY LIMITS (infinite-scroll protection) ----------
+    const MAX_CAPTURES = 60;
+    const MAX_HEIGHT_PX = 25000;
+
     let y = 0;
     let lastCaptureTime = 0;
     let captureNumber = 0;
     const step = Math.max(100, viewportHeight - 2);
 
-    // ---------- CAPTURE + DRAW LOOP (one at a time) ----------
-    while (y < scrollHeight) {
-      // Chrome capture rate limit protection
+    // ---------- CAPTURE + DRAW LOOP ----------
+    while (y < scrollHeight && captureNumber < MAX_CAPTURES) {
+
+      if (y > MAX_HEIGHT_PX) {
+        console.warn("Reached max capture height – stopping.");
+        break;
+      }
+
+      // Rate-limit protection
       const now = Date.now();
       const elapsed = now - lastCaptureTime;
       if (lastCaptureTime && elapsed < 500) {
         await sleep(500 - elapsed);
       }
 
-      const result = await scrollPage(tabId, y);
-      const actualY = result.scrollY;
+      let actualY;
+      try {
+        const result = await scrollPage(tabId, y);
+        actualY = result.scrollY;
+      } catch (error) {
+        if (String(error.message).startsWith("PAGE_UNSTABLE:")) {
+          console.warn("Page became unstable while scrolling – stitching what we have.");
+          break;
+        }
+        throw error;
+      }
+
       await sleep(delay + 150);
 
       captureNumber++;
@@ -322,18 +379,27 @@ async function captureFullPage(tabId, windowId, format, speed, notify) {
         });
       } catch (captureError) {
         console.error("captureVisibleTab failed:", captureError);
+        if (
+          String(captureError.message).includes("Frame") ||
+          String(captureError.message).includes("tab")
+        ) {
+          console.warn("Capture failed due to page change – stitching what we have.");
+          break;
+        }
         throw new Error(`Chrome could not capture the viewport: ${captureError.message}`);
       }
 
-      // Immediately hand the single screenshot to offscreen and free the base64 string
-      const addResult = await offscreenAddScreenshot(imageDataUrl, actualY, scale);
-      if (!addResult || !addResult.success) {
-        throw new Error(addResult?.error || "Failed to draw screenshot.");
+      // Draw immediately and free memory
+      try {
+        const addResult = await offscreenAddScreenshot(imageDataUrl, actualY, scale);
+        if (!addResult || !addResult.success) {
+          console.error("Failed to draw screenshot:", addResult?.error);
+        }
+      } catch (addError) {
+        console.error("offscreenAddScreenshot error:", addError);
       }
 
-      // Explicitly drop the large string so GC can reclaim it
       imageDataUrl = null;
-
       lastCaptureTime = Date.now();
 
       const bottom = actualY + viewportHeight;
@@ -350,6 +416,10 @@ async function captureFullPage(tabId, windowId, format, speed, notify) {
 
     // ---------- FINALIZE ----------
     sendProgress(85, "Combining screenshots...");
+
+    if (!(await chrome.offscreen.hasDocument())) {
+      throw new Error("Screenshot processor was closed unexpectedly.");
+    }
 
     const finishResult = await offscreenFinish();
     if (!finishResult || !finishResult.success) {
@@ -385,7 +455,7 @@ async function captureFullPage(tabId, windowId, format, speed, notify) {
 }
 
 // ============================================================
-// MESSAGE HANDLER (from popup)
+// MESSAGE HANDLER
 // ============================================================
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -419,5 +489,5 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
   });
 
-  return true; // keep the message channel open for the async response
+  return true;
 });

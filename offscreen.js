@@ -1,10 +1,6 @@
 /*
  * ZiS - Offscreen Screenshot Processor
- * offscreen.js  (v1.0.2)
- *
- * Receives one screenshot at a time from the service worker,
- * draws it onto a single OffscreenCanvas, then returns the
- * final data URL when asked.
+ * offscreen.js  (v1.0.3)
  */
 
 let canvas = null;
@@ -12,10 +8,6 @@ let ctx = null;
 let currentFormat = "png";
 let currentOutputWidth = 0;
 let currentOutputHeight = 0;
-
-// ============================================================
-// HELPERS
-// ============================================================
 
 async function dataUrlToBitmap(dataUrl) {
   const response = await fetch(dataUrl);
@@ -34,7 +26,6 @@ async function canvasToDataUrl(canvas, format) {
   const buffer = await blob.arrayBuffer();
   const bytes = new Uint8Array(buffer);
 
-  // Convert to base64 in chunks to avoid call-stack limits
   let binary = "";
   const chunkSize = 0x8000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -48,13 +39,8 @@ async function canvasToDataUrl(canvas, format) {
   };
 }
 
-// ============================================================
-// MESSAGE HANDLER
-// ============================================================
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
-  // ---------- START A NEW CANVAS ----------
   if (message.action === "stitchStart") {
     (async () => {
       try {
@@ -69,7 +55,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           throw new Error("Could not create screenshot canvas.");
         }
 
-        // White background
         ctx.fillStyle = "#ffffff";
         ctx.fillRect(0, 0, currentOutputWidth, currentOutputHeight);
 
@@ -85,7 +70,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // ---------- ADD ONE SCREENSHOT ----------
   if (message.action === "stitchAdd") {
     (async () => {
       try {
@@ -94,7 +78,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         const bitmap = await dataUrlToBitmap(message.dataUrl);
-
         const destinationY = Math.round(message.scrollY * message.scale);
 
         if (destinationY >= currentOutputHeight) {
@@ -128,7 +111,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // ---------- FINISH & EXPORT ----------
   if (message.action === "stitchFinish") {
     (async () => {
       try {
@@ -138,7 +120,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         const result = await canvasToDataUrl(canvas, currentFormat);
 
-        // Clean up
         canvas = null;
         ctx = null;
 
@@ -158,6 +139,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // Ignore unknown messages
   return false;
 });
