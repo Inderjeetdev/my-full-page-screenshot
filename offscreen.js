@@ -1,456 +1,163 @@
 /*
  * ZiS - Offscreen Screenshot Processor
+ * offscreen.js  (v1.0.2)
  *
- * Receives viewport screenshots from background.js,
- * stitches them together and creates the final PNG/JPG.
+ * Receives one screenshot at a time from the service worker,
+ * draws it onto a single OffscreenCanvas, then returns the
+ * final data URL when asked.
  */
 
+let canvas = null;
+let ctx = null;
+let currentFormat = "png";
+let currentOutputWidth = 0;
+let currentOutputHeight = 0;
 
 // ============================================================
-// DATA URL → IMAGE BITMAP
+// HELPERS
 // ============================================================
 
-async function dataUrlToBitmap(
-  dataUrl
-) {
-
-  const response =
-    await fetch(
-      dataUrl
-    );
-
-
+async function dataUrlToBitmap(dataUrl) {
+  const response = await fetch(dataUrl);
   if (!response.ok) {
-
-    throw new Error(
-      "Could not read captured screenshot."
-    );
+    throw new Error("Could not read captured screenshot.");
   }
-
-
-  const blob =
-    await response.blob();
-
-
-  return await createImageBitmap(
-    blob
-  );
+  const blob = await response.blob();
+  return await createImageBitmap(blob);
 }
 
+async function canvasToDataUrl(canvas, format) {
+  const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
+  const quality = format === "jpg" ? 0.92 : undefined;
 
-// ============================================================
-// CANVAS → DATA URL
-// ============================================================
+  const blob = await canvas.convertToBlob({ type: mimeType, quality });
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
 
-async function canvasToDataUrl(
-  canvas,
-  format
-) {
-
-  const mimeType =
-    format === "jpg"
-      ? "image/jpeg"
-      : "image/png";
-
-
-  const quality =
-    format === "jpg"
-      ? 0.92
-      : undefined;
-
-
-  const blob =
-    await canvas.convertToBlob({
-
-      type:
-        mimeType,
-
-      quality:
-        quality
-
-    });
-
-
-  const buffer =
-    await blob.arrayBuffer();
-
-
-  const bytes =
-    new Uint8Array(
-      buffer
-    );
-
-
-  let binary =
-    "";
-
-
-  const chunkSize =
-    0x8000;
-
-
-  for (
-    let i = 0;
-    i < bytes.length;
-    i += chunkSize
-  ) {
-
-    const chunk =
-      bytes.subarray(
-
-        i,
-
-        Math.min(
-          i + chunkSize,
-          bytes.length
-        )
-
-      );
-
-
-    binary +=
-      String.fromCharCode(
-        ...chunk
-      );
+  // Convert to base64 in chunks to avoid call-stack limits
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
   }
 
-
   return {
-
-    dataUrl:
-      `data:${mimeType};base64,${btoa(binary)}`,
-
-    mimeType:
-      mimeType
-
+    dataUrl: `data:${mimeType};base64,${btoa(binary)}`,
+    mimeType
   };
 }
 
-
 // ============================================================
-// STITCH
-// ============================================================
-
-async function stitchScreenshots(
-  screenshots,
-  outputWidth,
-  outputHeight,
-  scale,
-  format
-) {
-
-  if (
-    !Array.isArray(
-      screenshots
-    ) ||
-    screenshots.length === 0
-  ) {
-
-    throw new Error(
-      "No screenshots were received."
-    );
-  }
-
-
-  // ----------------------------------------------------------
-  // Canvas
-  // ----------------------------------------------------------
-
-  const canvas =
-    new OffscreenCanvas(
-
-      outputWidth,
-
-      outputHeight
-
-    );
-
-
-  const ctx =
-    canvas.getContext(
-
-      "2d",
-
-      {
-        alpha:
-          false
-      }
-
-    );
-
-
-  if (!ctx) {
-
-    throw new Error(
-      "Could not create screenshot canvas."
-    );
-  }
-
-
-  // ----------------------------------------------------------
-  // White background
-  // ----------------------------------------------------------
-
-  ctx.fillStyle =
-    "#ffffff";
-
-
-  ctx.fillRect(
-
-    0,
-
-    0,
-
-    outputWidth,
-
-    outputHeight
-
-  );
-
-
-  // ----------------------------------------------------------
-  // Draw screenshots
-  // ----------------------------------------------------------
-
-  for (
-    let i = 0;
-    i < screenshots.length;
-    i++
-  ) {
-
-    const screenshot =
-      screenshots[i];
-
-
-    if (
-      !screenshot?.dataUrl
-    ) {
-      continue;
-    }
-
-
-    const bitmap =
-      await dataUrlToBitmap(
-        screenshot.dataUrl
-      );
-
-
-    /*
-     * Convert CSS scroll position to device pixels.
-     */
-
-    const destinationY =
-      Math.round(
-
-        screenshot.scrollY *
-        scale
-
-      );
-
-
-    if (
-      destinationY >=
-      outputHeight
-    ) {
-
-      bitmap.close();
-
-      continue;
-    }
-
-
-    const remainingHeight =
-      outputHeight -
-      destinationY;
-
-
-    /*
-     * The screenshot is scaled to the complete
-     * output width.
-     */
-
-    const destinationWidth =
-      outputWidth;
-
-
-    /*
-     * Don't draw beyond bottom of canvas.
-     */
-
-    const destinationHeight =
-      Math.min(
-
-        bitmap.height,
-
-        remainingHeight
-
-      );
-
-
-    if (
-      destinationHeight > 0
-    ) {
-
-      ctx.drawImage(
-
-        bitmap,
-
-        0,
-
-        0,
-
-        bitmap.width,
-
-        destinationHeight,
-
-        0,
-
-        destinationY,
-
-        destinationWidth,
-
-        destinationHeight
-
-      );
-    }
-
-
-    bitmap.close();
-
-
-    // --------------------------------------------------------
-    // Progress
-    // --------------------------------------------------------
-
-    chrome.runtime.sendMessage({
-
-      action:
-        "stitchProgress",
-
-      progress:
-        82 +
-        Math.round(
-
-          (
-            (i + 1) /
-            screenshots.length
-          ) *
-
-          12
-
-        )
-
-    }).catch(() => {});
-  }
-
-
-  // ----------------------------------------------------------
-  // Export
-  // ----------------------------------------------------------
-
-  return await canvasToDataUrl(
-
-    canvas,
-
-    format
-
-  );
-}
-
-
-// ============================================================
-// MESSAGE LISTENER
+// MESSAGE HANDLER
 // ============================================================
 
-chrome.runtime.onMessage.addListener(
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
-  (
-    message,
-    sender,
-    sendResponse
-  ) => {
+  // ---------- START A NEW CANVAS ----------
+  if (message.action === "stitchStart") {
+    (async () => {
+      try {
+        currentOutputWidth = message.outputWidth;
+        currentOutputHeight = message.outputHeight;
+        currentFormat = message.format || "png";
 
+        canvas = new OffscreenCanvas(currentOutputWidth, currentOutputHeight);
+        ctx = canvas.getContext("2d", { alpha: false });
 
-    if (
-      message.action !==
-      "stitchScreenshots"
-    ) {
-
-      return;
-    }
-
-
-    (
-      async () => {
-
-        try {
-
-          const result =
-            await stitchScreenshots(
-
-              message.screenshots,
-
-              message.outputWidth,
-
-              message.outputHeight,
-
-              message.scale,
-
-              message.format
-
-            );
-
-
-          sendResponse({
-
-            action:
-              "stitchResult",
-
-            requestId:
-              message.requestId,
-
-            success:
-              true,
-
-            dataUrl:
-              result.dataUrl,
-
-            mimeType:
-              result.mimeType
-
-          });
-
-
-        } catch (error) {
-
-          console.error(
-            "Screenshot stitching error:",
-            error
-          );
-
-
-          sendResponse({
-
-            action:
-              "stitchResult",
-
-            requestId:
-              message.requestId,
-
-            success:
-              false,
-
-            error:
-              error?.message ||
-              "Screenshot stitching failed."
-
-          });
+        if (!ctx) {
+          throw new Error("Could not create screenshot canvas.");
         }
 
+        // White background
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, currentOutputWidth, currentOutputHeight);
+
+        sendResponse({ success: true });
+      } catch (error) {
+        console.error("stitchStart error:", error);
+        sendResponse({
+          success: false,
+          error: error?.message || "Failed to start canvas."
+        });
       }
-    )();
-
-
+    })();
     return true;
   }
-);
+
+  // ---------- ADD ONE SCREENSHOT ----------
+  if (message.action === "stitchAdd") {
+    (async () => {
+      try {
+        if (!canvas || !ctx) {
+          throw new Error("Canvas has not been initialised.");
+        }
+
+        const bitmap = await dataUrlToBitmap(message.dataUrl);
+
+        const destinationY = Math.round(message.scrollY * message.scale);
+
+        if (destinationY >= currentOutputHeight) {
+          bitmap.close();
+          sendResponse({ success: true });
+          return;
+        }
+
+        const remainingHeight = currentOutputHeight - destinationY;
+        const destinationWidth = currentOutputWidth;
+        const destinationHeight = Math.min(bitmap.height, remainingHeight);
+
+        if (destinationHeight > 0) {
+          ctx.drawImage(
+            bitmap,
+            0, 0, bitmap.width, destinationHeight,
+            0, destinationY, destinationWidth, destinationHeight
+          );
+        }
+
+        bitmap.close();
+        sendResponse({ success: true });
+      } catch (error) {
+        console.error("stitchAdd error:", error);
+        sendResponse({
+          success: false,
+          error: error?.message || "Failed to draw screenshot."
+        });
+      }
+    })();
+    return true;
+  }
+
+  // ---------- FINISH & EXPORT ----------
+  if (message.action === "stitchFinish") {
+    (async () => {
+      try {
+        if (!canvas) {
+          throw new Error("No canvas to finalise.");
+        }
+
+        const result = await canvasToDataUrl(canvas, currentFormat);
+
+        // Clean up
+        canvas = null;
+        ctx = null;
+
+        sendResponse({
+          success: true,
+          dataUrl: result.dataUrl,
+          mimeType: result.mimeType
+        });
+      } catch (error) {
+        console.error("stitchFinish error:", error);
+        sendResponse({
+          success: false,
+          error: error?.message || "Failed to finalise screenshot."
+        });
+      }
+    })();
+    return true;
+  }
+
+  // Ignore unknown messages
+  return false;
+});
